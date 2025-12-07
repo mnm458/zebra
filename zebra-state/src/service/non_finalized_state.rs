@@ -375,8 +375,13 @@ impl NonFinalizedState {
             if let Some(new_best_chain) = self.best_chain() {
                 let (new_tip_height, new_tip_hash) = new_best_chain.non_finalized_tip();
 
-                // Reorg detected if best chain tip changed
-                if new_tip_hash != old_tip_hash {
+                // Check if the old tip is still in the new best chain (normal chain extension)
+                // A true reorg means the new chain doesn't contain the old tip block
+                let is_chain_extension = new_best_chain.blocks.contains_key(&old_tip_height) &&
+                    new_best_chain.blocks.get(&old_tip_height).map_or(false, |b| b.hash == old_tip_hash);
+
+                // Reorg detected if best chain tip changed AND it's not just extending the chain
+                if new_tip_hash != old_tip_hash && !is_chain_extension {
                     // Calculate depth: how far back did we reorg?
                     // This is approximate - actual fork point might be deeper
                     let depth = old_tip_height.0.saturating_sub(
