@@ -28,6 +28,7 @@ use crate::{
 
 mod backup;
 mod chain;
+mod chain_metrics;
 
 #[cfg(test)]
 pub(crate) use backup::MIN_DURATION_BETWEEN_BACKUP_UPDATES;
@@ -243,8 +244,14 @@ impl NonFinalizedState {
 
         while self.chain_set.len() > MAX_NON_FINALIZED_CHAIN_FORKS {
             // The first chain is the chain with the lowest work.
-            self.chain_set.pop_first();
+            if let Some(dropped_chain) = self.chain_set.pop_first() {
+                let chain_length = dropped_chain.len() as u64;
+                chain_metrics::chain_fork_limit_dropped(chain_length);
+            }
         }
+
+        // Update active forks count
+        chain_metrics::update_active_forks(self.chain_set.len());
 
         self.update_metrics_bars();
     }
@@ -287,6 +294,8 @@ impl NonFinalizedState {
             if side_chain.non_finalized_root_hash() != best_chain_root.hash {
                 // If we popped the root, the chain would be empty or orphaned,
                 // so just drop it now.
+                let chain_length = side_chain.len() as u64;
+                chain_metrics::stale_chain_dropped(chain_length);
                 drop(side_chain);
 
                 continue;
@@ -333,13 +342,52 @@ impl NonFinalizedState {
         // and drop the cloned parent Arc, or newly created chain fork.
         let modified_chain = self.validate_and_commit(parent_chain, prepared, finalized_state)?;
 
+        // Detect forks: check if there are competing blocks at the same height
+        let has_competing_block_at_height = self.chain_set.iter().any(|chain| {
+            // Check if this chain has a block at the same height with a different hash
+            chain.blocks.contains_key(&height) &&
+            chain.blocks.get(&height).map_or(false, |block| block.hash != hash)
+        });
+
+        if has_competing_block_at_height {
+            // Calculate fork depth (distance from finalized tip to fork point)
+            let finalized_tip_height = finalized_state.finalized_tip_height().unwrap_or(Height(0));
+            let fork_depth = height.0.saturating_sub(finalized_tip_height.0);
+            chain_metrics::fork_detected(height, fork_depth);
+        }
+
+        // Detect reorgs: capture old best chain before inserting new chain
+        let old_best_chain_tip = self.best_chain().map(|chain| {
+            let (tip_height, tip_hash) = chain.non_finalized_tip();
+            (tip_height, tip_hash, chain.len())
+        });
+
         // If the block is valid:
         // - add the new chain fork or updated chain to the set of recent chains
         // - remove the parent chain, if it was in the chain set
         //   (if it was a newly created fork, it won't be in the chain set)
-        self.insert_with(modified_chain, |chain_set| {
+        self.insert_with(modified_chain.clone(), |chain_set| {
             chain_set.retain(|chain| chain.non_finalized_tip_hash() != parent_hash)
         });
+
+        // Check if best chain changed (reorg detected)
+        if let Some((old_tip_height, old_tip_hash, old_chain_len)) = old_best_chain_tip {
+            if let Some(new_best_chain) = self.best_chain() {
+                let (new_tip_height, new_tip_hash) = new_best_chain.non_finalized_tip();
+
+                // Reorg detected if best chain tip changed
+                if new_tip_hash != old_tip_hash {
+                    // Calculate depth: how far back did we reorg?
+                    // This is approximate - actual fork point might be deeper
+                    let depth = old_tip_height.0.saturating_sub(
+                        old_tip_height.0.min(new_tip_height.0)
+                    );
+                    let blocks_replaced = old_chain_len.saturating_sub(1) as u64;
+
+                    chain_metrics::reorg_detected(depth, blocks_replaced);
+                }
+            }
+        }
 
         self.update_metrics_for_committed_block(height, hash);
 
@@ -641,7 +689,12 @@ impl NonFinalizedState {
         block_commitment_result.expect("scope has finished")?;
         sprout_anchor_result.expect("scope has finished")?;
 
-        chain_push_result.expect("scope has finished")
+        let result = chain_push_result.expect("scope has finished")?;
+
+        // Track successful block commit
+        chain_metrics::block_committed();
+
+        Ok(result)
     }
 
     /// Returns the length of the non-finalized portion of the current best chain
