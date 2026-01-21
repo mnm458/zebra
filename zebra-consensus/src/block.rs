@@ -168,6 +168,8 @@ where
         let span = tracing::debug_span!("block", height = ?block.coinbase_height());
 
         async move {
+            let verification_start = std::time::Instant::now();
+
             let hash = block.hash();
             // Check that this block is actually a new block.
             tracing::trace!("checking that block is not already in state");
@@ -240,6 +242,8 @@ where
             tx::check::coinbase_outputs_are_decryptable(&coinbase_tx, &network, height)?;
 
             // Send transactions to the transaction verifier to be checked
+            let tx_verification_start = std::time::Instant::now();
+
             let mut async_checks = FuturesUnordered::new();
 
             let known_utxos = Arc::new(transparent::new_ordered_outputs(
@@ -296,6 +300,13 @@ where
                 }
             }
 
+            // Record transaction verification duration
+            let tx_verification_duration_ms = tx_verification_start.elapsed().as_millis() as f64;
+            metrics::histogram!("consensus.block.transaction_verification.duration_ms")
+                .record(tx_verification_duration_ms);
+            metrics::gauge!("consensus.block.transaction_verification.last_duration_ms")
+                .set(tx_verification_duration_ms);
+
             // Check the summed block totals
 
             if sigops > MAX_BLOCK_SIGOPS {
@@ -350,7 +361,7 @@ where
                 };
             }
 
-            match state_service
+            let result = match state_service
                 .ready()
                 .await
                 .map_err(VerifyBlockError::Commit)?
@@ -363,7 +374,16 @@ where
                     Ok(hash)
                 }
                 _ => unreachable!("wrong response for CommitSemanticallyVerifiedBlock"),
-            }
+            };
+
+            // Record total block verification duration
+            let total_duration_ms = verification_start.elapsed().as_millis() as f64;
+            metrics::histogram!("consensus.block.verification.total_duration_ms")
+                .record(total_duration_ms);
+            metrics::gauge!("consensus.block.verification.last_total_duration_ms")
+                .set(total_duration_ms);
+
+            result
         }
         .instrument(span)
         .boxed()

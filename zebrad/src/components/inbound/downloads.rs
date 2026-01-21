@@ -254,6 +254,7 @@ where
             }
             .map_err(|e| (e, None))?;
 
+            let download_start = std::time::Instant::now();
             let (block, advertiser_addr) = if let zn::Response::Blocks(blocks) = network
                 .oneshot(zn::Request::BlocksByHash(std::iter::once(hash).collect()))
                 .await
@@ -275,6 +276,9 @@ where
             } else {
                 unreachable!("wrong response to block request");
             };
+            let download_duration_ms = download_start.elapsed().as_millis() as f64;
+            metrics::histogram!("network.block.download.duration_ms").record(download_duration_ms);
+            metrics::gauge!("network.block.download.last_duration_ms").set(download_duration_ms);
             metrics::counter!("gossip.downloaded.block.count").increment(1);
 
             // # Security & Performance

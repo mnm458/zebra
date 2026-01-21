@@ -54,6 +54,8 @@ pub(crate) fn validate_and_commit_non_finalized(
     non_finalized_state: &mut NonFinalizedState,
     prepared: SemanticallyVerifiedBlock,
 ) -> Result<(), ValidateContextError> {
+    let commit_start = std::time::Instant::now();
+
     check::initial_contextual_validity(finalized_state, non_finalized_state, &prepared)?;
     let parent_hash = prepared.block.header.previous_block_hash;
 
@@ -62,6 +64,10 @@ pub(crate) fn validate_and_commit_non_finalized(
     } else {
         non_finalized_state.commit_block(prepared, finalized_state)?;
     }
+
+    let commit_duration_ms = commit_start.elapsed().as_millis() as f64;
+    metrics::histogram!("state.block.commit.duration_ms").record(commit_duration_ms);
+    metrics::gauge!("state.block.commit.last_duration_ms").set(commit_duration_ms);
 
     Ok(())
 }

@@ -202,7 +202,15 @@ impl Verifier {
     /// Synchronously process the batch, and send the result using the channel sender.
     /// This function blocks until the batch is completed.
     fn verify(batch: BatchValidator, vk: &'static BatchVerifyingKey, tx: Sender) {
+        let start = std::time::Instant::now();
         let result = batch.validate(vk, thread_rng());
+        let duration_ms = start.elapsed().as_millis() as f64;
+
+        metrics::histogram!("consensus.proof.halo2.verification.duration_ms")
+            .record(duration_ms);
+        metrics::gauge!("consensus.proof.halo2.verification.last_duration_ms")
+            .set(duration_ms);
+
         let _ = tx.send(Some(result));
     }
 
@@ -221,11 +229,18 @@ impl Verifier {
     /// This function returns a future that becomes ready when the batch is completed.
     async fn flush_spawning(batch: BatchValidator, vk: &'static BatchVerifyingKey, tx: Sender) {
         // Correctness: Do CPU-intensive work on a dedicated thread, to avoid blocking other futures.
-        let _ = tx.send(
-            spawn_fifo(move || batch.validate(vk, thread_rng()))
-                .await
-                .ok(),
-        );
+        let start = std::time::Instant::now();
+        let result = spawn_fifo(move || batch.validate(vk, thread_rng()))
+            .await
+            .ok();
+        let duration_ms = start.elapsed().as_millis() as f64;
+
+        metrics::histogram!("consensus.proof.halo2.verification.duration_ms")
+            .record(duration_ms);
+        metrics::gauge!("consensus.proof.halo2.verification.last_duration_ms")
+            .set(duration_ms);
+
+        let _ = tx.send(result);
     }
 
     /// Verify a single item using a thread pool, and return the result.
