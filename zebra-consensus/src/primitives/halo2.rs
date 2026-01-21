@@ -202,7 +202,15 @@ impl Verifier {
     /// Synchronously process the batch, and send the result using the channel sender.
     /// This function blocks until the batch is completed.
     fn verify(batch: BatchValidator, vk: &'static BatchVerifyingKey, tx: Sender) {
+        let start = std::time::Instant::now();
         let result = batch.validate(vk, thread_rng());
+        let duration_ms = start.elapsed().as_millis() as f64;
+
+        metrics::histogram!("consensus.proof.halo2.verification.duration_ms")
+            .record(duration_ms);
+        metrics::gauge!("consensus.proof.halo2.verification.last_duration_ms")
+            .set(duration_ms);
+
         let _ = tx.send(Some(result));
     }
 
@@ -223,18 +231,12 @@ impl Verifier {
         // Correctness: Do CPU-intensive work on a dedicated thread, to avoid blocking other futures.
         let start = std::time::Instant::now();
         let result = spawn_fifo(move || batch.validate(vk, thread_rng())).await;
-        let duration = start.elapsed().as_secs_f64();
+        let duration_ms = start.elapsed().as_millis() as f64;
 
-        let result_label = match &result {
-            Ok(true) => "success",
-            _ => "failure",
-        };
-        metrics::histogram!(
-            "zebra.consensus.batch.duration_seconds",
-            "verifier" => "halo2",
-            "result" => result_label
-        )
-        .record(duration);
+        metrics::histogram!("consensus.proof.halo2.verification.duration_ms")
+            .record(duration_ms);
+        metrics::gauge!("consensus.proof.halo2.verification.last_duration_ms")
+            .set(duration_ms);
 
         let _ = tx.send(result.ok());
     }
