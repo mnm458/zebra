@@ -4,6 +4,7 @@ use std::{
     collections::HashMap,
     pin::Pin,
     task::{Context, Poll},
+    time::Instant,
 };
 
 use futures::{
@@ -355,10 +356,23 @@ where
                     .map_err(|e| (e.into(), None))?;
             }
 
+            // Track verification start time for delay metrics
+            let verify_start = Instant::now();
+
             verifier
                 .oneshot(zebra_consensus::Request::Commit(block))
                 .await
-                .map(|hash| (hash, block_height))
+                .map(|hash| {
+                    // Record verification delay
+                    let verify_duration_ms = verify_start.elapsed().as_millis() as f64;
+                    metrics::histogram!("zcash.block.verify.delay.seconds").record(verify_duration_ms / 1000.0);
+
+                    // Record total processing delay (download + verify) for propagation model
+                    let total_processing_ms = download_start.elapsed().as_millis() as f64;
+                    metrics::histogram!("zcash.block.processing.delay.seconds").record(total_processing_ms / 1000.0);
+
+                    (hash, block_height)
+                })
                 .map_err(|e| (e, advertiser_addr))
         }
         .map_ok(|(hash, height)| {

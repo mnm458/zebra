@@ -161,6 +161,10 @@ impl Handler {
             ) => {
                 if nonce == rsp_nonce {
                     let duration = ping_sent_at.elapsed();
+
+                    // Record RTT histogram for block propagation analysis
+                    metrics::histogram!("zcash.net.peer.rtt.seconds").record(duration.as_secs_f64());
+
                     Handler::Finished(Ok(Response::Pong(duration)))
                 } else {
                     Handler::Ping {
