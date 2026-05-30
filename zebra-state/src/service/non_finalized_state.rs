@@ -368,8 +368,11 @@ impl NonFinalizedState {
         // Detect forks: check if there are competing blocks at the same height
         let has_competing_block_at_height = self.chain_set.iter().any(|chain| {
             // Check if this chain has a block at the same height with a different hash
-            chain.blocks.contains_key(&height) &&
-            chain.blocks.get(&height).map_or(false, |block| block.hash != hash)
+            chain.blocks.contains_key(&height)
+                && chain
+                    .blocks
+                    .get(&height)
+                    .map_or(false, |block| block.hash != hash)
         });
 
         if has_competing_block_at_height {
@@ -379,10 +382,26 @@ impl NonFinalizedState {
             chain_metrics::fork_detected(height, fork_depth);
         }
 
-        // Detect reorgs: capture old best chain before inserting new chain
+        // Detect reorgs: capture old best chain info before inserting new chain.
+        // We need tip info and the chain's fork point with the new chain to calculate depth.
         let old_best_chain_tip = self.best_chain().map(|chain| {
             let (tip_height, tip_hash) = chain.non_finalized_tip();
-            (tip_height, tip_hash, chain.len())
+            // Find the highest height where both the old best chain and new modified chain
+            // share the same block (the fork point between them).
+            let fork_point_height = modified_chain
+                .blocks
+                .keys()
+                .filter(|h| {
+                    chain.blocks.get(h).map_or(false, |old_block| {
+                        modified_chain
+                            .blocks
+                            .get(h)
+                            .map_or(false, |new_block| old_block.hash == new_block.hash)
+                    })
+                })
+                .max()
+                .copied();
+            (tip_height, tip_hash, fork_point_height)
         });
 
         // If the block is valid:
@@ -394,23 +413,32 @@ impl NonFinalizedState {
         });
 
         // Check if best chain changed (reorg detected)
-        if let Some((old_tip_height, old_tip_hash, old_chain_len)) = old_best_chain_tip {
+        if let Some((old_tip_height, old_tip_hash, fork_point_height)) = old_best_chain_tip {
             if let Some(new_best_chain) = self.best_chain() {
-                let (new_tip_height, new_tip_hash) = new_best_chain.non_finalized_tip();
+                let (_, new_tip_hash) = new_best_chain.non_finalized_tip();
 
                 // Check if the old tip is still in the new best chain (normal chain extension)
                 // A true reorg means the new chain doesn't contain the old tip block
-                let is_chain_extension = new_best_chain.blocks.contains_key(&old_tip_height) &&
-                    new_best_chain.blocks.get(&old_tip_height).map_or(false, |b| b.hash == old_tip_hash);
+                let is_chain_extension = new_best_chain.blocks.contains_key(&old_tip_height)
+                    && new_best_chain
+                        .blocks
+                        .get(&old_tip_height)
+                        .map_or(false, |b| b.hash == old_tip_hash);
 
                 // Reorg detected if best chain tip changed AND it's not just extending the chain
                 if new_tip_hash != old_tip_hash && !is_chain_extension {
-                    // Calculate depth: how far back did we reorg?
-                    // This is approximate - actual fork point might be deeper
-                    let depth = old_tip_height.0.saturating_sub(
-                        old_tip_height.0.min(new_tip_height.0)
-                    );
-                    let blocks_replaced = old_chain_len.saturating_sub(1) as u64;
+                    // Depth here is the number of blocks rolled back from old tip to the fork point
+                    let depth = match fork_point_height {
+                        Some(fp) => old_tip_height.0.saturating_sub(fp.0),
+                        // If no common block found, the chains diverge from their roots
+                        None => old_tip_height.0.saturating_sub(
+                            finalized_state
+                                .finalized_tip_height()
+                                .unwrap_or(Height(0))
+                                .0,
+                        ),
+                    };
+                    let blocks_replaced = depth as u64;
 
                     chain_metrics::reorg_detected(depth, blocks_replaced);
                 }
